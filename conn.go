@@ -168,18 +168,26 @@ type Conn struct {
 
 // connect establishes a connection to a Cassandra node using session's connection config.
 func (s *Session) connect(ctx context.Context, host *HostInfo, errorHandler ConnErrorHandler) (*Conn, error) {
-	return s.dial(ctx, host, s.connCfg, errorHandler)
+	return s.connectWithParams(ctx, host, nil, errorHandler)
+}
+
+func (s *Session) connectWithParams(ctx context.Context, host *HostInfo, scConnParams *scyllaConnParams, errorHandler ConnErrorHandler) (*Conn, error) {
+	return s.dialWithParams(ctx, host, s.connCfg, scConnParams, errorHandler)
 }
 
 // dial establishes a connection to a Cassandra node and notifies the session's connectObserver.
 func (s *Session) dial(ctx context.Context, host *HostInfo, connConfig *ConnConfig, errorHandler ConnErrorHandler) (*Conn, error) {
+	return s.dialWithParams(ctx, host, connConfig, nil, errorHandler)
+}
+
+func (s *Session) dialWithParams(ctx context.Context, host *HostInfo, connConfig *ConnConfig, scConnParams *scyllaConnParams, errorHandler ConnErrorHandler) (*Conn, error) {
 	var obs ObservedConnect
 	if s.connectObserver != nil {
 		obs.Host = host
 		obs.Start = time.Now()
 	}
 
-	conn, err := s.dialWithoutObserver(ctx, host, connConfig, errorHandler)
+	conn, err := s.dialWithoutObserver(ctx, host, connConfig, scConnParams, errorHandler)
 
 	if s.connectObserver != nil {
 		obs.End = time.Now()
@@ -193,7 +201,7 @@ func (s *Session) dial(ctx context.Context, host *HostInfo, connConfig *ConnConf
 // dialWithoutObserver establishes connection to a Cassandra node.
 //
 // dialWithoutObserver does not notify the connection observer, so you most probably want to call dial() instead.
-func (s *Session) dialWithoutObserver(ctx context.Context, host *HostInfo, cfg *ConnConfig, errorHandler ConnErrorHandler) (*Conn, error) {
+func (s *Session) dialWithoutObserver(ctx context.Context, host *HostInfo, cfg *ConnConfig, scConnParams *scyllaConnParams, errorHandler ConnErrorHandler) (*Conn, error) {
 	ip := host.ConnectAddress()
 	port := host.port
 
@@ -212,8 +220,9 @@ func (s *Session) dialWithoutObserver(ctx context.Context, host *HostInfo, cfg *
 		if cfg.Keepalive > 0 {
 			d.KeepAlive = cfg.Keepalive
 		}
-		dialer = d
+		dialer = wrapScyllaDialerExt(d)
 	}
+	dialer = wrapScyllaShardAwarePortDialer(dialer, scConnParams)
 
 	conn, err := dialer.DialContext(ctx, "tcp", host.HostnameAndPort())
 	if err != nil {

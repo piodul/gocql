@@ -130,6 +130,8 @@ type HostInfo struct {
 	state            nodeState
 	schemaVersion    string
 	tokens           []string
+
+	untranslatedConnectAddress net.IP
 }
 
 func (h *HostInfo) Equal(host *HostInfo) bool {
@@ -187,6 +189,20 @@ func (h *HostInfo) connectAddressLocked() (net.IP, string) {
 func (h *HostInfo) ConnectAddress() net.IP {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+
+	if addr, _ := h.connectAddressLocked(); validIpAddr(addr) {
+		return addr
+	}
+	panic(fmt.Sprintf("no valid connect address for host: %v. Is your cluster configured correctly?", h))
+}
+
+func (h *HostInfo) getUntranslatedConnectAddress() net.IP {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	if len(h.untranslatedConnectAddress) != 0 {
+		return h.untranslatedConnectAddress
+	}
 
 	if addr, _ := h.connectAddressLocked(); validIpAddr(addr) {
 		return addr
@@ -561,7 +577,9 @@ func (s *Session) hostInfoFromMap(row map[string]interface{}, host *HostInfo) (*
 		// Not sure what the port field will be called until the JIRA issue is complete
 	}
 
-	ip, port := s.cfg.translateAddressPort(host.ConnectAddress(), host.port)
+	host.untranslatedConnectAddress = host.ConnectAddress()
+
+	ip, port := s.cfg.translateAddressPort(host.untranslatedConnectAddress, host.port)
 	host.connectAddress = ip
 	host.port = port
 

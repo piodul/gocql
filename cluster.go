@@ -149,12 +149,33 @@ type ClusterConfig struct {
 	// If not provided, a default dialer configured with ConnectTimeout will be used.
 	Dialer Dialer
 
+	// Scylla-specific cluster options
+	Scylla ScyllaClusterOpts
+
 	// internal config for testing
 	disableControlConn bool
 }
 
+// Scylla-specific cluster options
+type ScyllaClusterOpts struct {
+	// EnableSourcePortBasedLoadBalancing controls if the driver should make use
+	// of the native_shard_aware_transport_port and native_shard_aware_transport_port_ssl
+	// ports (if they are properly configured on the node).
+	//
+	// This option improves the process of establishing per-shard connections,
+	// but you need to make sure that it will work in your setup.
+	// See the "Configuration" section of README.md for more details.
+	EnableSourcePortBasedLoadBalancing bool
+}
+
 type Dialer interface {
 	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
+}
+
+// DialerExt is an optional extension of the Dialer interface that allows specifying the source port.
+type DialerExt interface {
+	Dialer
+	DialContextWithSourcePort(ctx context.Context, sourcePort uint16, network, addr string) (net.Conn, error)
 }
 
 // NewCluster generates a new config for the default cluster implementation.

@@ -72,6 +72,35 @@ if localDC != "" {
 }
 ```
 
+This version of gocql supports a more robust method of establishing connection for each shard by using _shard aware ports_ for native transport. It greatly reduces time and the number of connections that need to be opened in some specific cases, e.g. when many clients connect at once, or when there are other clients connected to the same node that are not shard-aware. However, in order to work correctly, it requires the following conditions to be fulfilled:
+
+1. Enable this feature in the driver by setting `Scylla.EnableSourcePortBasedLoadBalancing` option to true.
+1. Your node should not be behind NAT that changes TCP source port. Gocql uses the source port to tell Scylla which shard should handle the connection, therefore it is important that it is not changed.
+1. `native_shard_aware_transport_port` and/or `native_shard_aware_transport_port_ssl` need to be set up properly and reachable from the client.
+1. If you use a custom `Dialer`, you need to make sure that it implements the `DialerExt` interface, which accepts a source port number that should be used when connecting. If you do not use a custom dialer, then gocql will use a default implementation that already implements `DialerExt`.
+
+Please note that gocql will still use the regular native transport ports in order to establish the first connection. You need to make sure that both regular and shard-aware ports are reachable from the client.
+
+An example of a custom dialer that supports choosing the source port:
+
+```go
+type myDialer struct {}
+
+func (md *myDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	return md.DialContextWithSourcePort(ctx, 0, network, addr)
+}
+
+func (md *myDialer) DialContextWithSourcePort(ctx context.Context, sourcePort uint16, network, addr string) (net.Conn, error) {
+	localAddr, err := net.ResolveTCPAddr(network, fmt.Sprintf(":%d", sourcePort))
+	if err != nil {
+		return nil, err
+	}
+
+	dialer := net.Dialer{LocalAddr: localAddr}
+	return dialer.DialContext(ctx, network, addr)
+}
+```
+
 ---
 
 Package gocql implements a fast and robust Cassandra client for the

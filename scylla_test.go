@@ -1,6 +1,7 @@
 package gocql
 
 import (
+	"fmt"
 	"math"
 	"runtime"
 	"sync"
@@ -214,4 +215,62 @@ func TestScyllaLWTExtParsing(t *testing.T) {
 			t.Error("expected to have LWT flag to be set after framer init")
 		}
 	})
+}
+
+func TestScyllaPortPicker(t *testing.T) {
+	t.Parallel()
+
+	for _shardCount := 1; _shardCount <= 64; _shardCount++ {
+		shardCount := _shardCount
+		t.Run(fmt.Sprintf("shard count %d", shardCount), func(t *testing.T) {
+			t.Parallel()
+			for shardID := 0; shardID < shardCount; shardID++ {
+				// Count by brute force ports that can be used to connect to requested shard
+				expectedPortCount := 0
+				for i := scyllaPortBasedBalancingMin; i <= scyllaPortBasedBalancingMax; i++ {
+					if i%shardCount == shardID {
+						expectedPortCount++
+					}
+				}
+
+				// Enumerate all ports using the port picker and assert various things
+				picker := newScyllaPortPicker(shardID, shardCount)
+				actualPortCount := 0
+				previousPort := 0
+
+				for {
+					portU16, ok := picker.nextPort()
+					if !ok {
+						break
+					}
+
+					port := int(portU16)
+
+					if port < scyllaPortBasedBalancingMin || port > scyllaPortBasedBalancingMax {
+						t.Errorf("expected port %d generated from picker to be in range [%d..%d]",
+							port, scyllaPortBasedBalancingMin, scyllaPortBasedBalancingMax)
+					}
+
+					if port <= previousPort {
+						t.Errorf("expected port %d generated from picker to be larger than the previous generated port %d",
+							port, previousPort)
+					}
+
+					actualShardOfPort := scyllaShardForSourcePort(portU16, shardCount)
+					if actualShardOfPort != shardID {
+						t.Errorf("expected port %d returned from picker to belong to shard %d, but belongs to %d",
+							port, shardID, actualShardOfPort)
+					}
+
+					previousPort = port
+					actualPortCount++
+				}
+
+				if expectedPortCount != actualPortCount {
+					t.Errorf("expected port picker to generate %d ports, but got %d",
+						expectedPortCount, actualPortCount)
+				}
+			}
+		})
+	}
 }

@@ -1,11 +1,15 @@
 package gocql
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"math"
+	"net"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 // scyllaSupported represents Scylla connection options as sent in SUPPORTED
@@ -203,6 +207,13 @@ type scyllaConnPicker struct {
 	nrShards    int
 	msbIgnore   uint64
 	pos         uint64
+
+	shardAwareAddress    string
+	shardAwareAddressSSL string
+
+	disableShardAwareConnectionsUntil time.Time
+
+	freeShardRR int
 }
 
 func newScyllaConnPicker(conn *Conn) *scyllaConnPicker {
@@ -214,9 +225,20 @@ func newScyllaConnPicker(conn *Conn) *scyllaConnPicker {
 		Logger.Printf("scylla: %s sharding options %+v", conn.Address(), conn.scyllaSupported)
 	}
 
+	translate := func(port uint16) string {
+		if port == 0 {
+			return ""
+		}
+		tIP, tPort := conn.session.cfg.translateAddressPort(conn.host.getUntranslatedConnectAddress(), int(port))
+		return net.JoinHostPort(tIP.String(), strconv.Itoa(tPort))
+	}
+
 	return &scyllaConnPicker{
 		nrShards:  conn.scyllaSupported.nrShards,
 		msbIgnore: conn.scyllaSupported.msbIgnore,
+
+		shardAwareAddress:    translate(conn.scyllaSupported.shardAwarePort),
+		shardAwareAddressSSL: translate(conn.scyllaSupported.shardAwarePortSSL),
 	}
 }
 
@@ -330,6 +352,25 @@ func (p *scyllaConnPicker) Put(conn *Conn) {
 	}
 }
 
+// Returns a shard to connect to. If there is a
+func (p *scyllaConnPicker) getShardToConnect() (int, bool) {
+	if p.nrConns == p.nrShards {
+		return 0, false
+	}
+	// There is at least one shard that does not have a connection open.
+	// Advance the counter in round robin fashion until the shard is found.
+	for {
+		shard := p.freeShardRR
+		p.freeShardRR++
+		if p.freeShardRR >= p.nrShards {
+			p.freeShardRR = 0
+		}
+		if p.conns[shard] == nil {
+			return shard, true
+		}
+	}
+}
+
 // closeExcessConns closes the excess connections and clears
 // the excessConns slice. This function needs to be called
 // in a goroutine safe context, i.e. when the external pool
@@ -352,4 +393,260 @@ func (p *scyllaConnPicker) randomConn() *Conn {
 		}
 	}
 	return nil
+}
+
+type scyllaDialerExt struct {
+	net.Dialer
+}
+
+var _ DialerExt = (*scyllaDialerExt)(nil)
+
+func wrapScyllaDialerExt(d *net.Dialer) *scyllaDialerExt {
+	return &scyllaDialerExt{*d}
+}
+
+func (spd *scyllaDialerExt) DialContextWithSourcePort(ctx context.Context, sourcePort uint16, network, addr string) (net.Conn, error) {
+	localAddr, err := net.ResolveTCPAddr(network, fmt.Sprintf(":%d", sourcePort))
+	if err != nil {
+		return nil, err
+	}
+
+	// Make sure that we are copying the dialer struct, not just a pointer
+	var portDialer net.Dialer = spd.Dialer
+	portDialer.LocalAddr = localAddr
+
+	return portDialer.DialContext(ctx, network, addr)
+}
+
+type scyllaShardAwarePortDialer struct {
+	innerDialer DialerExt
+
+	scConnParams *scyllaConnParams
+}
+
+func wrapScyllaShardAwarePortDialer(innerDialer Dialer, scConnParams *scyllaConnParams) Dialer {
+	innerDialerExt, isExt := innerDialer.(DialerExt)
+	if !isExt {
+		return innerDialer
+	}
+
+	if !scConnParams.usesShardAwarePort() {
+		return innerDialer
+	}
+
+	return &scyllaShardAwarePortDialer{
+		innerDialer:  innerDialerExt,
+		scConnParams: scConnParams,
+	}
+}
+
+func (ssapd *scyllaShardAwarePortDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	for {
+		sourcePort := ssapd.scConnParams.sourcePort
+		if gocqlDebug {
+			Logger.Printf("scylla: connecting from port %d", sourcePort)
+		}
+		conn, err := ssapd.innerDialer.DialContextWithSourcePort(ctx, sourcePort, network, ssapd.scConnParams.targetAddress)
+		if err != nil {
+			if opErr, isOpErr := err.(*net.OpError); isOpErr {
+				if strings.Contains(opErr.Error(), "address already in use") {
+					// if we failed to bind, then probably it was due to the port being
+					// already allocated, so we can retry immediately with another port
+					if ssapd.scConnParams.updateToNextPort() {
+						continue
+					} else {
+						break
+					}
+				}
+			}
+		}
+		return conn, err
+	}
+
+	return nil, errors.New("scylla: could not allocate a free source port for connection")
+}
+
+const (
+	// the minimum port number that can be chosen for port-based load balancing
+	scyllaPortBasedBalancingMin = 0x8000
+
+	// the maximum port number that can be chosen for port-based load balancing
+	scyllaPortBasedBalancingMax = 0xFFFF
+)
+
+func (pool *hostConnPool) makeScyllaConnParams() *scyllaConnParams {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+
+	scp, ok := pool.connPicker.(*scyllaConnPicker)
+	if !ok {
+		return nil
+	}
+
+	if !pool.session.cfg.Scylla.EnableSourcePortBasedLoadBalancing {
+		return nil
+	}
+
+	return &scyllaConnParams{
+		scyllaShardAwarePortOptions: scp.makeShardAwarePortOptions(pool.session.connCfg),
+
+		connPicker: scp,
+	}
+}
+
+// Must be called under hostConnPool.mu write lock
+func (p *scyllaConnPicker) makeShardAwarePortOptions(cfg *ConnConfig) *scyllaShardAwarePortOptions {
+	disabledUntil := p.disableShardAwareConnectionsUntil
+
+	if time.Now().Before(disabledUntil) {
+		// Temporarily disabled, fallback to the old method
+		if gocqlDebug {
+			Logger.Printf("shard aware port disabled until %v, falling back to the regular one", disabledUntil)
+		}
+		return nil
+	}
+
+	var targetAddress string
+	if cfg.tlsConfig != nil {
+		targetAddress = p.shardAwareAddressSSL
+	} else {
+		targetAddress = p.shardAwareAddress
+	}
+
+	if targetAddress == "" {
+		// Shard-aware port not supported by the host, fallback to the old method
+		if gocqlDebug {
+			Logger.Printf("no shard-aware port info for SSL=%b, falling back to regular port", cfg.tlsConfig != nil)
+		}
+		return nil
+	}
+
+	shard, ok := p.getShardToConnect()
+	if !ok {
+		// For each shard, a connection is being established or is already open
+		if gocqlDebug {
+			Logger.Printf("did not get a shard to connect, falling back to regular port")
+		}
+		return nil
+	}
+
+	portPicker := newScyllaPortPicker(shard, p.nrShards)
+	sourcePort, hasPort := portPicker.nextPort()
+	if !hasPort {
+		// There are no ports in range?
+		return nil
+	}
+
+	return &scyllaShardAwarePortOptions{
+		targetAddress: targetAddress,
+		sourcePort:    sourcePort,
+		shard:         shard,
+		portPicker:    portPicker,
+	}
+}
+
+type scyllaConnParams struct {
+	*scyllaShardAwarePortOptions
+
+	connPicker *scyllaConnPicker
+}
+
+// must be called under hostConnPool's lock
+func (scp *scyllaConnParams) verifyConnection(conn *Conn) {
+	if !scp.usesShardAwarePort() {
+		return
+	}
+
+	if conn.scyllaSupported.shard != scp.getShard() {
+		// Something's wrong, we got a connection to the wrong shard.
+		// It may be caused by network configuration issues (e.g. NAT
+		// modifies the source port).
+		// Temporarily disable connecting to the shard aware port. This will allow
+		// us to make progress in establishing connection per shard, and also
+		// make it possible to use the new method if network configuration is fixed
+		// in the meantime.
+		scp.connPicker.disableShardAwareConnectionsUntil = time.Now().Add(1 * time.Minute)
+
+		if gocqlDebug {
+			Logger.Printf("disabling connections to shard aware port for host %s, %s",
+				scp.connPicker.shardAwareAddress, scp.connPicker.shardAwareAddressSSL)
+		}
+	}
+}
+
+func (scp *scyllaConnParams) usesShardAwarePort() bool {
+	return scp != nil && scp.scyllaShardAwarePortOptions != nil
+}
+
+func (scp *scyllaConnParams) updateToNextPort() bool {
+	if !scp.usesShardAwarePort() {
+		return false
+	}
+	return scp.scyllaShardAwarePortOptions.updateToNextPort()
+}
+
+func (scp *scyllaConnParams) getShard() int {
+	if !scp.usesShardAwarePort() {
+		return -1
+	}
+	return scp.scyllaShardAwarePortOptions.shard
+}
+
+type scyllaShardAwarePortOptions struct {
+	targetAddress string
+	sourcePort    uint16
+	shard         int
+
+	portPicker *scyllaPortPicker
+}
+
+func (ssapo *scyllaShardAwarePortOptions) updateToNextPort() bool {
+	var hadPort bool
+	ssapo.sourcePort, hadPort = ssapo.portPicker.nextPort()
+	return hadPort
+}
+
+// Picks a port for a given shard
+type scyllaPortPicker struct {
+	currentPort int
+	shardCount  int
+}
+
+// May return nil if there are no source ports for that shard in given port range
+func newScyllaPortPicker(shardID, shardCount int) *scyllaPortPicker {
+	if shardCount == 0 {
+		panic("shardCount cannot be nil")
+	}
+
+	// Find the smallest port p such that p >= min and p % shardCount == shardID
+	firstInRange := scyllaPortBasedBalancingMin
+	rem := scyllaShardForSourcePort(uint16(firstInRange), shardCount) - shardID
+	firstInRange -= rem
+	if firstInRange < scyllaPortBasedBalancingMin {
+		firstInRange += shardCount
+	}
+
+	return &scyllaPortPicker{
+		currentPort: firstInRange,
+		shardCount:  shardCount,
+	}
+}
+
+func (pp *scyllaPortPicker) nextPort() (uint16, bool) {
+	if pp == nil {
+		return 0, false
+	}
+
+	p := pp.currentPort
+
+	if p > scyllaPortBasedBalancingMax {
+		return 0, false
+	}
+
+	pp.currentPort += pp.shardCount
+	return uint16(p), true
+}
+
+func scyllaShardForSourcePort(sourcePort uint16, shardCount int) int {
+	return int(sourcePort) % shardCount
 }

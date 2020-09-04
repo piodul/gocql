@@ -466,10 +466,13 @@ func (pool *hostConnPool) connect() (err error) {
 	// TODO: provide a more robust connection retry mechanism, we should also
 	// be able to detect hosts that come up by trying to connect to downed ones.
 	// try to connect
+
+	scParams := pool.makeScyllaConnParams()
+
 	var conn *Conn
 	reconnectionPolicy := pool.session.cfg.ReconnectionPolicy
 	for i := 0; i < reconnectionPolicy.GetMaxRetries(); i++ {
-		conn, err = pool.session.connect(pool.session.ctx, pool.host, pool)
+		conn, err = pool.session.connectWithParams(pool.session.ctx, pool.host, scParams, pool)
 		if err == nil {
 			break
 		}
@@ -507,6 +510,8 @@ func (pool *hostConnPool) connect() (err error) {
 		conn.Close()
 		return nil
 	}
+
+	scParams.verifyConnection(conn)
 
 	// lazily initialize the connPicker when we know the required type
 	pool.initConnPicker(conn)
