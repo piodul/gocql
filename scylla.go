@@ -222,6 +222,8 @@ type scyllaConnPicker struct {
 
 	// Used to disable new connections to the shard-aware port temporarily
 	disableShardAwarePortUntil *atomic.Value
+
+	creationTime time.Time
 }
 
 func newScyllaConnPicker(conn *Conn) *scyllaConnPicker {
@@ -260,6 +262,8 @@ func newScyllaConnPicker(conn *Conn) *scyllaConnPicker {
 		shardAwarePortDisabled: conn.session.cfg.DisableShardAwarePort,
 
 		disableShardAwarePortUntil: new(atomic.Value),
+
+		creationTime: time.Now(),
 	}
 }
 
@@ -443,6 +447,7 @@ func (p *scyllaConnPicker) closeConns() {
 }
 
 func (p *scyllaConnPicker) closeExcessConns() {
+	fmt.Printf("DEBUGLOG: %s per-shard pool was populated %s after its creation", p.address, time.Now().Sub(p.creationTime))
 	if len(p.excessConns) == 0 {
 		if gocqlDebug {
 			Logger.Printf("scylla: %s no excess connections to close", p.address)
