@@ -195,6 +195,8 @@ func newScyllaConnPicker(conn *Conn) *scyllaConnPicker {
 		Logger.Printf("scylla: %s new conn picker sharding options %+v", addr, conn.scyllaSupported)
 	}
 
+	fmt.Printf("DEBUGLOG: %s new conn picker sharding options %+v", addr, conn.scyllaSupported)
+
 	return &scyllaConnPicker{
 		address:   addr,
 		nrShards:  conn.scyllaSupported.nrShards,
@@ -271,12 +273,14 @@ func (p *scyllaConnPicker) Put(conn *Conn) {
 		if gocqlDebug {
 			Logger.Printf("scylla: %s put shard %d excess connection total: %d missing: %d excess: %d", p.address, shard, p.nrConns, p.nrShards-p.nrConns, len(p.excessConns))
 		}
+		fmt.Printf("DEBUGLOG: %s put shard %d excess connection total: %d missing: %d excess: %d", p.address, shard, p.nrConns, p.nrShards-p.nrConns, len(p.excessConns))
 	} else {
 		p.conns[shard] = conn
 		p.nrConns++
 		if gocqlDebug {
 			Logger.Printf("scylla: %s put shard %d connection total: %d missing: %d", p.address, shard, p.nrConns, p.nrShards-p.nrConns)
 		}
+		fmt.Printf("DEBUGLOG: %s put shard %d connection total: %d missing: %d", p.address, shard, p.nrConns, p.nrShards-p.nrConns)
 	}
 
 	if p.shouldCloseExcessConns() {
@@ -346,6 +350,7 @@ func (p *scyllaConnPicker) closeExcessConns() {
 		if gocqlDebug {
 			Logger.Printf("scylla: %s no excess connections to close", p.address)
 		}
+		fmt.Printf("scylla: %s no excess connections to close", p.address)
 		return
 	}
 
@@ -355,6 +360,7 @@ func (p *scyllaConnPicker) closeExcessConns() {
 	if gocqlDebug {
 		Logger.Printf("scylla: %s closing %d excess connections", p.address, len(conns))
 	}
+	fmt.Printf("scylla: %s closing %d excess connections", p.address, len(conns))
 	go closeConns(conns)
 }
 
