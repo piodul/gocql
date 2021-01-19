@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 // scyllaSupported represents Scylla connection options as sent in SUPPORTED
@@ -182,6 +183,8 @@ type scyllaConnPicker struct {
 	nrShards    int
 	msbIgnore   uint64
 	pos         uint64
+
+	creationTime time.Time
 }
 
 func newScyllaConnPicker(conn *Conn) *scyllaConnPicker {
@@ -201,6 +204,8 @@ func newScyllaConnPicker(conn *Conn) *scyllaConnPicker {
 		address:   addr,
 		nrShards:  conn.scyllaSupported.nrShards,
 		msbIgnore: conn.scyllaSupported.msbIgnore,
+
+		creationTime: time.Now(),
 	}
 }
 
@@ -346,6 +351,7 @@ func (p *scyllaConnPicker) closeConns() {
 }
 
 func (p *scyllaConnPicker) closeExcessConns() {
+	fmt.Printf("DEBUGLOG: %s per-shard pool was populated %s after its creation", p.address, time.Now().Sub(p.creationTime))
 	if len(p.excessConns) == 0 {
 		if gocqlDebug {
 			Logger.Printf("scylla: %s no excess connections to close", p.address)
