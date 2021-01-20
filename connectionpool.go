@@ -366,6 +366,7 @@ func (pool *hostConnPool) fill() {
 
 	// ok fill the pool
 	pool.filling = true
+	fmt.Printf("DEBUGLOG: %s filling the pool\n", pool.addr)
 
 	// allow others to access the pool while filling
 	pool.mu.Unlock()
@@ -429,6 +430,7 @@ func (pool *hostConnPool) fillingStopped(hadError bool) {
 
 	pool.mu.Lock()
 	pool.filling = false
+	fmt.Printf("DEBUGLOG: %s filling stopped, had error = %t\n", pool.addr, hadError)
 	pool.mu.Unlock()
 }
 
@@ -442,6 +444,9 @@ func (pool *hostConnPool) connectMany(count int) error {
 		mu         sync.Mutex
 		connectErr error
 	)
+
+	fmt.Printf("DEBUGLOG: %s connectMany %d\n", pool.addr, count)
+
 	wg.Add(count)
 	for i := 0; i < count; i++ {
 		go func() {

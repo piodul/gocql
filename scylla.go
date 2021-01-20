@@ -531,6 +531,7 @@ func (sosd *scyllaOneShardDialer) DialContext(ctx context.Context, network, addr
 		port, ok := iter.Next()
 		if !ok {
 			// We exhausted ports to connect from. Try the non-shard-aware port.
+			fmt.Printf("DEBUGLOG: dialing %s, non-shard-aware port\n", addr)
 			return sosd.dialer.DialContext(ctx, network, addr)
 		}
 
@@ -542,6 +543,7 @@ func (sosd *scyllaOneShardDialer) DialContext(ctx context.Context, network, addr
 			// We can immediately retry with another source port for this shard
 			continue
 		} else if err != nil {
+			fmt.Printf("DEBUGLOG: dialing %s, shard-aware port %d\n", addr, port)
 			conn, err := sosd.dialer.DialContext(ctx, network, addr)
 			if err == nil {
 				// We failed to connect to the shard-aware port, but succeeded
