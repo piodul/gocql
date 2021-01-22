@@ -543,7 +543,7 @@ func (sosd *scyllaOneShardDialer) DialContext(ctx context.Context, network, addr
 			// We can immediately retry with another source port for this shard
 			continue
 		} else if err != nil {
-			fmt.Printf("DEBUGLOG: dialing %s, shard-aware port %d\n", addr, port)
+			fmt.Printf("DEBUGLOG: couldn't dial %s, shard-aware port %d: %s\n", addr, port, err)
 			conn, err := sosd.dialer.DialContext(ctx, network, addr)
 			if err == nil {
 				// We failed to connect to the shard-aware port, but succeeded
@@ -553,6 +553,7 @@ func (sosd *scyllaOneShardDialer) DialContext(ctx context.Context, network, addr
 				// just after we tried the first connection.
 				// We can't avoid false positives here, so I'm putting it
 				// behind a debug flag.
+				fmt.Printf("DEBUGLOG: %s couldn't dial shard-aware port, but non-shard-aware works\n", addr)
 				if gocqlDebug {
 					Logger.Printf(
 						"scylla: %s couldn't connect to shard-aware address while the non-shard-aware address %s is available; this might be an issue with ",
@@ -563,6 +564,7 @@ func (sosd *scyllaOneShardDialer) DialContext(ctx context.Context, network, addr
 			}
 			return conn, err
 		}
+		fmt.Printf("DEBUGLOG: successfully dialed %s, shard-aware port %d\n", addr, port)
 		return conn, err
 	}
 }
